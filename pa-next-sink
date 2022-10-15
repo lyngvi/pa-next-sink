@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+
+import argparse
+import subprocess as sp
+import json
+import notify2
+
+# We will attempt to store and reuse the same notification ID across runs - this keeps the notification responsive when the user mashes the next sink button
+notification_id_filename='/tmp/.pa-next-sink.notification.id'
+
+def try_load_notification_id(fallback):
+    """Attempt to load the old notification ID, but don't worry if it fails"""
+    try:
+        with open(notification_id_filename, 'r') as f:
+            return int(f.read())
+    except FileNotFoundError:
+        pass
+    return fallback
+
+def notify_user(mode, choice, quiet):
+    """Present a notification to the user about the change in audio sink/source"""
+    notification = notify2.Notification(
+        f'Default audio {mode} changed',
+        choice["description"],
+        'audio-speakers')
+
+    notification.id = try_load_notification_id(notification.id)
+    # The sound effect is useful on default sink changes, not so much on source changes
+    if not quiet:
+        notification.set_hint('sound-name', 'device-added-audio')
+    notification.show()
+    with open(notification_id_filename, 'w') as f:
+        f.write(f'{notification.id}')
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Next/previous PulseAudio source/sink, for keybindings')
+    parser.add_argument('--mode', type=str, required=False, default='sink',
+        choices = ['source', 'sink'],
+        help='mode: one of source or sink, default source')
+    parser.add_argument('--prev', dest='offset', required=False, default=1, action='store_const', const=-1,
+        help='go to the previous source/sink instead')
+    parser.add_argument('--next', dest='offset', required=False, default=1, action='store_const', const= 1,
+        help='go to the next source/sink instead (default)')
+    parser.add_argument('--quiet', required=False, default=False, action='store_const', const=True,
+        help='do not request the notification to make a sound')
+    args = parser.parse_args()
+    return args
+
+def next_sinksource(mode, offset):
+    """Select the next/previous sink/source. In the case of sources, omit monitors, as this is seldom desired."""
+    options: list[dict] = json.loads(sp.check_output(['pactl', '-f', 'json', 'list', f'{args.mode}s']))
+    if mode == 'source':
+        options = list(filter(lambda o: ('monitor_source' not in o) or len(o['monitor_source']) == 0, options))
+    currentName = sp.check_output(['pactl', f'get-default-{args.mode}']).decode().strip()
+    currentIndex = next((k for k, v in enumerate(options) if v['name'] == currentName), -1)
+    choice = options[(currentIndex + offset) % len(options)]
+    sp.check_call(['pactl', f'set-default-{args.mode}', choice['name']])
+    return choice
+
+if __name__ == '__main__':
+    args = parse_args()
+    choice = next_sinksource(args.mode, args.offset)
+
+    # Print to console for command line use
+    print (f'{choice["name"]}')
+
+    # Present a notification
+    notify2.init('pa-next-sink')
+    notify_user(args.mode, choice, args.quiet)
