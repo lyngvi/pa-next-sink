@@ -17,11 +17,18 @@ def try_load_notification_id(fallback):
         pass
     return fallback
 
-def notify_user(mode, choice, quiet):
+def notify_user(choices: dict, quiet: bool):
     """Present a notification to the user about the change in audio sink/source"""
+    label = "devices"
+    if len(choices) == 1:
+        label = next(key for key in choices.keys())
+
     notification = notify2.Notification(
-        f'Default audio {mode} changed',
-        choice["description"],
+        f'Default audio {label} changed',
+        '\r'.join(map(
+            lambda k: choices[k]['description'],
+            sorted(choices.keys())
+        )),
         'audio-speakers')
 
     notification.id = try_load_notification_id(notification.id)
@@ -35,7 +42,7 @@ def notify_user(mode, choice, quiet):
 def parse_args():
     parser = argparse.ArgumentParser(description='Next/previous PulseAudio source/sink, for keybindings')
     parser.add_argument('--mode', type=str, required=False, default='sink',
-        choices = ['source', 'sink'],
+        choices = ['source', 'sink', 'both'],
         help='mode: one of source or sink, default source')
     parser.add_argument('--prev', dest='offset', required=False, default=1, action='store_const', const=-1,
         help='go to the previous source/sink instead')
@@ -48,22 +55,28 @@ def parse_args():
 
 def next_sinksource(mode, offset):
     """Select the next/previous sink/source. In the case of sources, omit monitors, as this is seldom desired."""
-    options: list[dict] = json.loads(sp.check_output(['pactl', '-f', 'json', 'list', f'{args.mode}s']))
+    if mode == 'both':
+        ret = next_sinksource('source', offset)
+        ret.update(next_sinksource('sink', offset))
+        return ret
+
+    options: list[dict] = json.loads(sp.check_output(['pactl', '-f', 'json', 'list', f'{mode}s']))
     if mode == 'source':
         options = list(filter(lambda o: ('monitor_source' not in o) or len(o['monitor_source']) == 0, options))
-    currentName = sp.check_output(['pactl', f'get-default-{args.mode}']).decode().strip()
+    currentName = sp.check_output(['pactl', f'get-default-{mode}']).decode().strip()
     currentIndex = next((k for k, v in enumerate(options) if v['name'] == currentName), -1)
     choice = options[(currentIndex + offset) % len(options)]
-    sp.check_call(['pactl', f'set-default-{args.mode}', choice['name']])
-    return choice
+    sp.check_call(['pactl', f'set-default-{mode}', choice['name']])
+    return { mode: choice }
 
 if __name__ == '__main__':
     args = parse_args()
-    choice = next_sinksource(args.mode, args.offset)
+    choices = next_sinksource(args.mode, args.offset)
 
     # Print to console for command line use
-    print (f'{choice["name"]}')
+    for (k, v) in sorted(choices.items(), key=lambda k: k[0], reverse=True):
+        print (f'{k}: {v["name"]}')
 
     # Present a notification
     notify2.init('pa-next-sink')
-    notify_user(args.mode, choice, args.quiet)
+    notify_user(choices, args.quiet)
